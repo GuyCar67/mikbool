@@ -1,4 +1,7 @@
-"""Distributed MD5 search - client: searches parts using all CPU cores."""
+"""Distributed MD5 search - client: searches parts using all CPU cores.
+
+Run on another machine with:  python client.py --host <SERVER_LAN_IP> --port 5000
+"""
 
 import argparse
 import hashlib
@@ -52,6 +55,8 @@ def worker(start, end, target, padding, digits, stop_event, result_box):
 
 
 def process_batch(start, end, target, padding, digits, num_threads, stop_event):
+    # One thread per core, each sweeping an equal slice of the batch -> the
+    # number of running jobs matches the number of processors.
     result_box = {"value": None}
     total = end - start
     if total <= 0:
@@ -77,7 +82,7 @@ def process_batch(start, end, target, padding, digits, num_threads, stop_event):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="127.0.0.1")   # set to server IP on other machines
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--threads", type=int, default=os.cpu_count() or 1)
     args = parser.parse_args()
@@ -86,14 +91,15 @@ def main():
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((args.host, args.port))
-    print("ready to catch")
+    print(f"connected to {args.host}:{args.port} with {cores} core(s)")
 
     stop_event = threading.Event()
     activated = False
 
     try:
         while not stop_event.is_set():
-            send_msg(sock, {"type": "get_work"})
+            # Tell the server our core count so it hands out proportional work.
+            send_msg(sock, {"type": "get_work", "cores": cores})
             msg = recv_msg(sock)
             if msg is None:
                 break

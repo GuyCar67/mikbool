@@ -38,9 +38,9 @@ def recv_msg(sock):
 
 TARGET_MD5 = os.environ.get("MD5_TARGET", "ec9c0f7edcc18a98b1f31853b1813301")
 TOTAL = int(os.environ.get("MD5_TOTAL", "10000000000"))      # search [0, TOTAL)
-DIGITS = int(os.environ.get("MD5_DIGITS", "10"))             # only used if PADDING
-PADDING = os.environ.get("MD5_PADDING", "0") in ("1", "true", "True")
-CHUNK_SIZE = int(os.environ.get("MD5_CHUNK", "50000"))       # numbers per part
+DIGITS = int(os.environ.get("MD5_DIGITS", "10"))             # width when PADDING
+PADDING = os.environ.get("MD5_PADDING", "1") in ("1", "true", "True")  # 10 digits -> ON
+CHUNK_SIZE = int(os.environ.get("MD5_CHUNK", "50000"))       # numbers per part (per core)
 LEASE_SECONDS = float(os.environ.get("MD5_LEASE", "60"))     # dead-client backstop
 
 
@@ -67,23 +67,25 @@ class WorkManager:
                 del self.assigned[rng]
                 self.pool.append(rng)
 
-    def _carve_fresh(self):
+    def _carve_fresh(self, count=1):
+        # Hand out chunk_size * count numbers so a client with more cores
+        # asks for proportionally more work in one go.
         if self.cursor >= self.total:
             return None
         start = self.cursor
-        end = min(self.cursor + self.chunk_size, self.total)
+        end = min(self.cursor + self.chunk_size * max(1, count), self.total)
         self.cursor = end
         return (start, end)
 
     def _space_confirmed_done(self):
         return self.cursor >= self.total and not self.pool and not self.assigned
 
-    def request_work(self, client_id):
+    def request_work(self, client_id, cores=1):
         with self.lock:
             if self.finished:
                 return ("stop", self.found_value)
             self._reap_expired()
-            rng = self.pool.popleft() if self.pool else self._carve_fresh()
+            rng = self.pool.popleft() if self.pool else self._carve_fresh(cores)
             if rng is None:
                 # Nothing fresh: done only if every part came back, else wait for
                 # parts still out with other clients (they may yet be requeued).
@@ -133,7 +135,8 @@ def handle_client(conn, addr, client_id, manager):
 
             mtype = msg.get("type")
             if mtype == "get_work":
-                kind, payload = manager.request_work(client_id)
+                cores = int(msg.get("cores", 1))
+                kind, payload = manager.request_work(client_id, cores)
                 if kind == "work":
                     start, end = payload
                     send_msg(conn, {"type": "work", "start": start, "end": end,
@@ -159,7 +162,7 @@ def handle_client(conn, addr, client_id, manager):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--host", default="0.0.0.0")   # 0.0.0.0 = reachable from other machines
     parser.add_argument("--port", type=int, default=5000)
     args = parser.parse_args()
 
@@ -169,7 +172,8 @@ def main():
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((args.host, args.port))
     srv.listen(64)
-    print(f"[server] listening on {args.host}:{args.port}, target {TARGET_MD5}")
+    print(f"[server] listening on {args.host}:{args.port}, target {TARGET_MD5}, "
+          f"padding={PADDING}, total={TOTAL}")
 
     next_id = 0
     try:
@@ -181,6 +185,7 @@ def main():
                 continue
             conn.settimeout(None)
             next_id += 1
+            print(f"[server] client #{next_id} connected from {addr[0]}")
             threading.Thread(target=handle_client,
                              args=(conn, addr, next_id, manager),
                              daemon=True).start()
